@@ -68,36 +68,41 @@ class PluploadHandler {
 		// 5 minutes execution time
 		@set_time_limit(5 * 60);
 
-		$conf = self::$conf = array_merge(array(
+		$conf = array_merge(array(
+			// external use
 			'file_data_name' => 'file',
 			'tmp_dir' => ini_get("upload_tmp_dir") . DIRECTORY_SEPARATOR . "plupload",
 			'target_dir' => false,
 			'cleanup' => true,
 			'max_file_age' => 5 * 3600,
+			'allow_extensions' => false,
+			'delay' => 0,
+			'cb_sanitize_file_name' => null,
+			'cb_check_file' => false,
+			
+			// internal use
 			'chunk' => isset($_REQUEST['chunk']) ? intval($_REQUEST['chunk']) : 0,
 			'chunks' => isset($_REQUEST['chunks']) ? intval($_REQUEST['chunks']) : 0,
 			'file_name' => isset($_REQUEST['name']) ? $_REQUEST['name'] : uniqid('file_'),
-			'allow_extensions' => false,
-			'delay' => 0,
-			'cb_sanitize_file_name' => array(__CLASS__, 'sanitize_file_name'),
-			'cb_check_file' => false,
+			'file_path' => false,
+			'tmp_path' => false,
+			'chunk_dir' => false,
+			'complete' => false,
 		), $conf);
 
 		self::$_error = null; // start fresh
 
 		try {
-			// Cleanup outdated temp files and folders
-			if ($conf['cleanup']) {
-				self::cleanup();
-			}
-
 			// Fake network congestion
 			if ($conf['delay']) {
 				usleep($conf['delay']);
 			}
 
+			// Sanitize File Name
 			if (is_callable($conf['cb_sanitize_file_name'])) {
-				$file_name = call_user_func($conf['cb_sanitize_file_name'], $conf['file_name']);
+				$file_name = $conf['file_name'] = call_user_func($conf['cb_sanitize_file_name'], $conf['file_name']);
+			} else {
+				$file_name = $conf['file_name'] = self::sanitize_file_name($conf['file_name']);
 			}
 
 			// Check if file type is allowed
@@ -111,18 +116,21 @@ class PluploadHandler {
 				}
 			}
 
-			$file_path = rtrim($conf['target_dir'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $file_name;
-			$tmp_path = $file_path . ".part";
+			$file_path = $conf['file_path'] = rtrim($conf['target_dir'], DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $file_name;
+			$tmp_path = $conf['tmp_path'] = $file_path . ".part";
 
 			// Write file or chunk to appropriate temp location
 			if ($conf['chunks']) {				
-				self::write_file_to("$file_path.dir.part" . DIRECTORY_SEPARATOR . $conf['chunk']);
+				$chunk_dir = $conf['chunk_dir'] = $file_path . ".dir.part";
+				self::$conf = $conf;
+				self::write_file_to($chunk_dir . DIRECTORY_SEPARATOR . $conf['chunk']);
 
 				// Check if all chunks already uploaded
 				if ($conf['chunk'] == $conf['chunks'] - 1) { 
-					self::write_chunks_to_file("$file_path.dir.part", $tmp_path);
+					self::write_chunks_to_file($chunk_dir, $tmp_path);
 				}
 			} else {
+				self::$conf = $conf;
 				self::write_file_to($tmp_path);
 			}
 
@@ -133,7 +141,14 @@ class PluploadHandler {
 				if (is_callable($conf['cb_check_file']) && !call_user_func($conf['cb_check_file'], $file_path)) {
 					@unlink($file_path);
 					throw new Exception('', PLUPLOAD_SECURITY_ERR);
+				} else {
+					self::$conf['complete'] = true;
 				}
+			}
+			
+			// Cleanup completed & outdated temp files and folders
+			if ($conf['cleanup']) {
+				self::cleanup();
 			}
 		} catch (Exception $ex) {
 			self::$_error = $ex->getCode();
@@ -217,14 +232,8 @@ class PluploadHandler {
 				fwrite($out, $buff);
 			}
 			@fclose($in);
-
-			// chunk is not required anymore
-			@unlink($chunk_path);
 		}
 		@fclose($out);
-
-		// Cleanup
-		self::rrmdir($chunk_dir);
 	}
 
 
@@ -265,8 +274,18 @@ class PluploadHandler {
 
 	private static function cleanup() 
 	{
-		// Remove old temp files	
 		if (file_exists(self::$conf['target_dir'])) {
+			// Remove current completed file
+			if (self::$conf['complete']) {
+				$current = empty(self::$conf['chunk_dir']) ? self::$conf['tmp_path'] : self::$conf['chunk_dir'];
+				if (is_dir($current)) {
+					self::rrmdir($current);
+				} else {
+					@unlink($current);
+				}
+			}
+
+			// Remove old temp files	
 			foreach(glob(self::$conf['target_dir'] . '/*.part') as $tmpFile) {
 				if (time() - filemtime($tmpFile) < self::$conf['max_file_age']) {
 					continue;
@@ -322,4 +341,3 @@ class PluploadHandler {
 		rmdir($dir);
 	}
 }
-
